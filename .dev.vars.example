@@ -1,0 +1,6 @@
+# Deploy to Cloudflare 按钮会读取这个文件，把每一项变成部署向导里的 Secret 输入框。
+# 不使用按钮（纯 Git 连接）也没关系：部署完成后到
+# Worker → Settings → Variables and Secrets 里手动添加同样名字的 Secret 即可。
+ADMIN_PASSWORD=change-me
+COOKIE_SECRET=openssl-rand-hex-32
+# GPTMAIL_API_KEY=

@@ -6,10 +6,11 @@
   "scripts": {
     "dev": "wrangler dev",
     "build": "tsc --noEmit",
-    "deploy": "wrangler deploy",
-    "db:migrate": "wrangler d1 migrations apply outlook-email-db",
-    "db:migrate:local": "wrangler d1 migrations apply outlook-email-db --local",
-    "test": "vitest run"
+    "deploy": "node scripts/prepare-d1.mjs && wrangler deploy",
+    "db:migrate": "wrangler d1 migrations apply DB --remote",
+    "db:migrate:local": "wrangler d1 migrations apply DB --local",
+    "test": "vitest run",
+    "db:ensure": "node scripts/prepare-d1.mjs"
   },
   "dependencies": {
     "hono": "^4.7.0"

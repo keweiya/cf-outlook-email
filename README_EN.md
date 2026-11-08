@@ -13,9 +13,9 @@
 [![D1](https://img.shields.io/badge/D1-SQLite-003B57?logo=sqlite&logoColor=white)](https://developers.cloudflare.com/d1/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/roseforyou/cf-outlook-email/pulls)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/roseforyou/cf-outlook-email)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/keweiya/cf-outlook-email)
 
-⚠️ This button **cannot one-click deploy** this project: it relies on a D1 database and Secrets, which require manually creating the DB, running migrations, and setting secrets — the button fails at framework detection. Please follow the 📖 [Deployment Guide](./docs/GUIDE.md) instead (~5 min).
+**Cloudflare Workers + D1 email manager.** Deploy the Worker with one button; create the database yourself once (the database ID only exists in your account).
 
 🌐 [中文](./README.md) · 📖 [Deployment Guide](./docs/GUIDE.md) · 🔌 [API Docs](./docs/API.md)
 
@@ -38,34 +38,136 @@
 - 🌐 **Bilingual UI** — Chinese by default, one-click switch to English in the topbar, preference remembered locally, backend messages translated on display
 - 🆓 **Completely Free** — Runs on Cloudflare's free tier, no credit card needed
 
-## 🚀 Quick Deploy
+## 🚀 Deploy
 
-> 💡 See the [Deployment Guide](./docs/GUIDE.md) for full steps.
+Short version: **click the button → database and tables are created for you → log in.**
+Tables are applied at build time by `scripts/prepare-d1.mjs`, which claims/creates the D1 database in the
+deploying account, writes its ID back, then runs `migrations/*.sql`.
 
-```bash
-# 1. Clone & install
-git clone https://github.com/roseforyou/cf-outlook-email.git
-cd cf-outlook-email
-pnpm install
+### ① One-click (recommended)
 
-# 2. Login to Cloudflare
-pnpm exec wrangler login
+Click the **Deploy to Cloudflare** button above; the wizard asks for three things:
 
-# 3. Create D1 database (copy database_id to wrangler.toml)
-pnpm exec wrangler d1 create outlook-email-db
-cp wrangler.toml.example wrangler.toml
-# Edit wrangler.toml, replace REPLACE_WITH_YOUR_DATABASE_ID
+| Field | Value |
+|---|---|
+| Worker name | `outlook-email` (or anything) |
+| `ADMIN_PASSWORD` | your login password |
+| `COOKIE_SECRET` | `openssl rand -hex 32`, or 32+ random characters |
 
-# 4. Set secrets
-pnpm exec wrangler secret put ADMIN_PASSWORD
-pnpm exec wrangler secret put COOKIE_SECRET
+Build log looks like:
 
-# 5. Initialize & deploy
-pnpm exec wrangler d1 migrations apply outlook-email-db --remote
-pnpm exec wrangler deploy
+```
+npm run build   → tsc --noEmit
+npm run deploy  → node scripts/prepare-d1.mjs   ← claim/create D1, write database_id, apply migrations
+                → wrangler deploy
 ```
 
-Visit the output URL and login with your password. 🎉
+Open `https://<worker>.<subdomain>.workers.dev` and log in.
+
+### ② Manual fallback (only if ① fails)
+
+If the build logs show `[prepare-d1][warn]` and the deploy fails (e.g. the build token lacks D1 permission):
+
+1. **Create the DB**: **Storage & Databases → D1 → Create**, name it `outlook-email-db`
+2. **Create tables**: open it → **Console** → run the three blocks below **one at a time**
+3. **Write the ID back**: put that database's `database_id` into `wrangler.toml` and `git push` (or run `pnpm run deploy` locally)
+
+> Why three blocks and no comments: the D1 console splits statements poorly when `--` comments are present
+> and reports `No SQL statements detected` ([workers-sdk#4713](https://github.com/cloudflare/workers-sdk/issues/4713)).
+
+**Part 1** · `settings` / `groups` / `accounts` / `temp_emails` + default group
+
+```sql
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS groups (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL UNIQUE,
+  description TEXT DEFAULT '',
+  color       TEXT DEFAULT '#2563eb',
+  created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at  TEXT DEFAULT CURRENT_TIMESTAMP
+);
+INSERT OR IGNORE INTO groups (id, name, description, color)
+VALUES (1, '默认分组', '默认邮箱分组', '#2563eb');
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  email         TEXT NOT NULL UNIQUE,
+  client_id     TEXT NOT NULL,
+  refresh_token TEXT NOT NULL,
+  password      TEXT DEFAULT '',
+  group_id      INTEGER DEFAULT 1,
+  remark        TEXT DEFAULT '',
+  status        TEXT DEFAULT 'active',
+  created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (group_id) REFERENCES groups(id)
+);
+
+CREATE TABLE IF NOT EXISTS temp_emails (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  email      TEXT NOT NULL UNIQUE,
+  source     TEXT DEFAULT '',
+  remark     TEXT DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**Part 2** · `tags` / `account_tags`
+
+```sql
+CREATE TABLE IF NOT EXISTS tags (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL UNIQUE,
+  color      TEXT DEFAULT '#6366f1',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS account_tags (
+  account_id INTEGER NOT NULL,
+  tag_id     INTEGER NOT NULL,
+  PRIMARY KEY (account_id, tag_id),
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_account_tags_tag ON account_tags(tag_id);
+```
+
+**Part 3** · `push_state`
+
+```sql
+CREATE TABLE IF NOT EXISTS push_state (
+  account_id     INTEGER PRIMARY KEY,
+  last_pushed_at TEXT DEFAULT '',
+  updated_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+```
+
+**Verify**
+
+```sql
+select name from sqlite_master where type='table' and name not like 'sqlite_%' order by name;
+```
+
+Expected 7 tables: `account_tags, accounts, groups, push_state, settings, tags, temp_emails`.
+
+### ③ Log in
+
+Open the Worker URL, log in with `ADMIN_PASSWORD`. `DB_NOT_READY` means tables are missing or the binding is not named `DB`.
+
+### ④ Updating later
+
+`git push` rebuilds and redeploys; `prepare-d1` re-resolves the binding on every build.
+Prefer binding through the dashboard instead? Comment out `[[d1_databases]]` in `wrangler.toml`, set the deploy
+command to `npx wrangler deploy`, and bind `DB` under **Settings → Bindings** — do not mix the two modes.
 
 ## 📮 Adding Accounts
 

@@ -1,0 +1,19 @@
+name = "outlook-email"
+main = "src/index.ts"
+compatibility_date = "2026-06-01"
+
+[assets]
+directory = "./public"
+binding = "ASSETS"
+
+# D1 绑定：database_id 是占位值，Deploy 按钮会自动回填成真实 ID。
+# 如果你的账号不止一个，按钮可能把 A 账号的库 ID 写回来、而构建跑在 B 账号，
+# 这时 scripts/prepare-d1.mjs 会在部署前按当前账号重新认领/创建同名库并回填，避免 7404。
+[[d1_databases]]
+binding = "DB"
+database_name = "outlook-email-db"
+database_id = "00000000-0000-0000-0000-000000000000"
+migrations_dir = "migrations"
+
+[triggers]
+crons = ["0 */6 * * *"]

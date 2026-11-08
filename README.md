@@ -13,19 +13,154 @@
 [![D1](https://img.shields.io/badge/D1-SQLite-003B57?logo=sqlite&logoColor=white)](https://developers.cloudflare.com/d1/)
 [![PRs Welcome](https://img.shields.io/badge/PRs-welcome-brightgreen.svg)](https://github.com/roseforyou/cf-outlook-email/pulls)
 
-[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/roseforyou/cf-outlook-email)
+[![Deploy to Cloudflare](https://deploy.workers.cloudflare.com/button)](https://deploy.workers.cloudflare.com/?url=https://github.com/keweiya/cf-outlook-email)
 
-⚠️ 此按钮**无法一键部署**：项目依赖 D1 数据库与 Secret，需手动建库、跑迁移、设密钥，按钮会因框架检测失败而报错。请按 📖 [详细部署教程](./docs/GUIDE.md) 操作（约 5 分钟）。
+## 🚀 部署
 
-🌐 [English](./README_EN.md) · 📖 [详细部署教程](./docs/GUIDE.md) · 🔌 [对外 API 文档](./docs/API.md)
+一句话：**点按钮 → 自动建库 + 自动建表 → 登录**。建表由构建时的 `scripts/prepare-d1.mjs` 完成，
+它会先在你当前账号里认领/创建 D1、回填 ID，再执行 `migrations/*.sql`。
 
-</div>
+### ① 一键部署（推荐）
 
----
+点上面的 **Deploy to Cloudflare** 按钮，向导里只需填三项：
 
-| 🌙 深色模式 | ☀️ 浅色模式 |
-|:---:|:---:|
-| ![深色模式](./docs/preview.png) | ![浅色模式](./docs/preview-light.png) |
+| 向导项 | 填什么 |
+|---|---|
+| Worker name | `outlook-email`（或任意） |
+| `ADMIN_PASSWORD` | 你的登录密码 |
+| `COOKIE_SECRET` | `openssl rand -hex 32`，或乱敲 32 位以上随机字符 |
+
+构建日志会依次出现：
+
+```
+npm run build   → tsc --noEmit
+npm run deploy  → node scripts/prepare-d1.mjs   ← 认领/创建 D1、回填 database_id、建表
+                → wrangler deploy
+```
+
+完成后打开 `https://<worker名>.<你的子域>.workers.dev`，用 `ADMIN_PASSWORD` 登录。
+
+> 数据库名默认 `outlook-email-db`。D1 由向导创建或由脚本创建，两种都行；跨账号也不会卡住。
+
+### ② 手动兜底（只在 ① 失败时需要）
+
+如果构建日志里出现 `[prepare-d1][warn]` 且部署最终失败（例如构建用的 API Token 没有 D1 权限），按下面三步收尾：
+
+1. **建库**：**Storage & Databases → D1 → Create**，名字 `outlook-email-db`
+2. **建表**：进这个库 → **Console** → 下面 3 段 SQL **按顺序、一段一段**粘贴执行
+3. **写回 ID**：把该库的 `database_id` 填进 `wrangler.toml` 的 `database_id` 字段并 `git push`
+   （或本地 `pnpm run deploy`），再次构建即通过
+
+> 为什么 3 段、为什么没有注释：D1 控制台对 `--` 注释的语句切分有 bug，带注释整段粘会报
+> `No SQL statements detected`（[workers-sdk#4713](https://github.com/cloudflare/workers-sdk/issues/4713)）。
+> 下面已是「去注释 + 分段」版本，直接用代码块右上角的复制按钮取。
+
+**第 1 段** · `settings` / `groups` / `accounts` / `temp_emails` + 默认分组
+
+```sql
+CREATE TABLE IF NOT EXISTS settings (
+  key        TEXT PRIMARY KEY,
+  value      TEXT NOT NULL,
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS groups (
+  id          INTEGER PRIMARY KEY AUTOINCREMENT,
+  name        TEXT NOT NULL UNIQUE,
+  description TEXT DEFAULT '',
+  color       TEXT DEFAULT '#2563eb',
+  created_at  TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at  TEXT DEFAULT CURRENT_TIMESTAMP
+);
+INSERT OR IGNORE INTO groups (id, name, description, color)
+VALUES (1, '默认分组', '默认邮箱分组', '#2563eb');
+
+CREATE TABLE IF NOT EXISTS accounts (
+  id            INTEGER PRIMARY KEY AUTOINCREMENT,
+  email         TEXT NOT NULL UNIQUE,
+  client_id     TEXT NOT NULL,
+  refresh_token TEXT NOT NULL,
+  password      TEXT DEFAULT '',
+  group_id      INTEGER DEFAULT 1,
+  remark        TEXT DEFAULT '',
+  status        TEXT DEFAULT 'active',
+  created_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at    TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (group_id) REFERENCES groups(id)
+);
+
+CREATE TABLE IF NOT EXISTS temp_emails (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  email      TEXT NOT NULL UNIQUE,
+  source     TEXT DEFAULT '',
+  remark     TEXT DEFAULT '',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP,
+  updated_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+```
+
+**第 2 段** · `tags` / `account_tags`
+
+```sql
+CREATE TABLE IF NOT EXISTS tags (
+  id         INTEGER PRIMARY KEY AUTOINCREMENT,
+  name       TEXT NOT NULL UNIQUE,
+  color      TEXT DEFAULT '#6366f1',
+  created_at TEXT DEFAULT CURRENT_TIMESTAMP
+);
+
+CREATE TABLE IF NOT EXISTS account_tags (
+  account_id INTEGER NOT NULL,
+  tag_id     INTEGER NOT NULL,
+  PRIMARY KEY (account_id, tag_id),
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE,
+  FOREIGN KEY (tag_id) REFERENCES tags(id) ON DELETE CASCADE
+);
+CREATE INDEX IF NOT EXISTS idx_account_tags_tag ON account_tags(tag_id);
+```
+
+**第 3 段** · `push_state`（Telegram 推送水位）
+
+```sql
+CREATE TABLE IF NOT EXISTS push_state (
+  account_id     INTEGER PRIMARY KEY,
+  last_pushed_at TEXT DEFAULT '',
+  updated_at     TEXT DEFAULT CURRENT_TIMESTAMP,
+  FOREIGN KEY (account_id) REFERENCES accounts(id) ON DELETE CASCADE
+);
+```
+
+**自检**
+
+```sql
+select name from sqlite_master where type='table' and name not like 'sqlite_%' order by name;
+```
+
+应返回 7 张表：`account_tags, accounts, groups, push_state, settings, tags, temp_emails`
+（`sqlite_sequence` 是 AUTOINCREMENT 的内部表，已过滤）
+
+### ③ 登录验收
+
+1. 打开 Worker 域名 → 自动跳 `/login.html`
+2. 用 `ADMIN_PASSWORD` 登录 → 进仪表盘
+3. 系统设置里改点东西并保存（验证 D1 写权限）
+4. 添加账号 → 「方式二：手动授权」（默认 Thunderbird Client ID + `https://localhost` 回调，免注册 Azure）→ 能读邮件
+
+| 遇到 | 原因 | 处理 |
+|---|---|---|
+| 登录提示「数据库未就绪」/ `DB_NOT_READY` | 表没建，或绑定变量名不是 `DB` | 走 ② 建表；确认绑定名是 `DB` |
+| 构建报 `could not be found [code: 7404]` | `prepare-d1` 没跑起来，或配置里的 ID 属于别的账号 | 看构建日志里的 `[prepare-d1]` 输出；必要时按 ② 手动填真实 ID |
+| 登录提示「服务端密钥未配置」 | `COOKIE_SECRET` 没设 | Settings → Variables and Secrets 补 |
+| D1 控制台报 `No SQL statements detected` | 粘了带 `--` 注释的版本，或整段被压成一行 | 用上面去注释的 3 段，逐段粘 |
+
+### ④ 以后怎么更新
+
+- 改代码：`git push`，构建会自动重新部署（`prepare-d1` 每次都会自愈绑定，不会因为 ID 变化而失败）。
+- 想完全用控制台管绑定（不用 wrangler）：把 `wrangler.toml` 里 `[[d1_databases]]` 整段注释掉，
+  Deploy command 改成 `npx wrangler deploy`，再在 **Settings → Bindings** 里绑 `DB`。
+  两种方式别混用，否则构建部署会把控制台加的绑定覆盖掉。
+- 💡 环境变量**不能**替代 D1 绑定：`env.DB` 必须是绑定对象（有 `.prepare()`），传 `D1_DATABASE_ID=xxx` 没用。
 
 ## ✨ 特性
 
@@ -38,34 +173,31 @@
 - 🌐 **中英双语** — 默认中文，顶栏一键切换 English，偏好本地记忆，后端消息同步翻译
 - 🆓 **完全免费** — 运行在 Cloudflare 免费层，无需信用卡
 
-## 🚀 快速部署
+## 🖥️ CLI 部署（可选，适合本地开发）
 
-> 💡 完整步骤请看 [详细部署教程](./docs/GUIDE.md)
+<details>
+<summary>展开：本地 wrangler 部署（建库 / 建表 / 密钥 / 部署）</summary>
 
 ```bash
-# 1. 克隆 & 安装
-git clone https://github.com/roseforyou/cf-outlook-email.git
+git clone https://github.com/<你的用户名>/cf-outlook-email.git
 cd cf-outlook-email
 pnpm install
-
-# 2. 登录 Cloudflare
 pnpm exec wrangler login
 
-# 3. 创建数据库（把输出的 database_id 填入 wrangler.toml）
-pnpm exec wrangler d1 create outlook-email-db
-cp wrangler.toml.example wrangler.toml
-# 编辑 wrangler.toml，替换 REPLACE_WITH_YOUR_DATABASE_ID
+# 一条命令搞定：脚本会认领/创建 D1、回填 database_id、跑迁移，然后部署
+pnpm run deploy
 
-# 4. 配置密码
+# 首次部署需要设置这两个 Secret（构建部署则填在 Cloudflare 的向导 / Settings 里）
 pnpm exec wrangler secret put ADMIN_PASSWORD
 pnpm exec wrangler secret put COOKIE_SECRET
-
-# 5. 初始化 & 部署
-pnpm exec wrangler d1 migrations apply outlook-email-db --remote
-pnpm exec wrangler deploy
 ```
 
-部署完成后访问输出的 URL，用设置的密码登录即可。🎉
+只想单独跑建库建表：`pnpm run db:ensure`（或 `pnpm run db:migrate`）。
+想用已有数据库：把它的 ID 填进 `wrangler.toml` 的 `database_id` 再 `pnpm run deploy`。
+
+更细的步骤（含 Telegram 推送、Azure 应用注册）见 [docs/GUIDE.md](./docs/GUIDE.md)。
+
+</details>
 
 ## 📮 添加邮箱
 
